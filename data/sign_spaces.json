@@ -9,14 +9,14 @@
       "toggle_mode": "shared",
       "created_at": 1792998981.781675,
       "gesture_ids": [
-        "e349642f",
         "633b4dda",
         "f79d4eb4",
         "21894f65",
         "79c22ffd",
-        "a9cc7d27"
+        "a9cc7d27",
+        "e349642f"
       ],
-      "updated_at": 1794301345.4706929,
+      "updated_at": 1794688694.1978357,
       "auto_close": false,
       "close_mode": "quiet"
     },
@@ -44,9 +44,9 @@
         "abcbd95f",
         "97162776"
       ],
-      "updated_at": 1794301069.9333448,
+      "updated_at": 1794690069.2057505,
       "auto_close": true,
-      "close_mode": "hand_off"
+      "close_mode": "quiet"
     },
     {
       "id": "spc_3f9f0b4f",
@@ -63,8 +63,25 @@
         "bc3d93a6",
         "0d099ce6"
       ],
-      "updated_at": 1794299425.5781786,
-      "auto_close": true
+      "updated_at": 1794690070.6551793,
+      "auto_close": true,
+      "close_mode": "hand_off"
+    },
+    {
+      "id": "spc_0160bc55",
+      "key": "SPELL",
+      "name": "Spell",
+      "join_mode": "spell",
+      "toggle_mode": "shared",
+      "close_mode": "hand_off",
+      "auto_close": false,
+      "created_at": 1794688434.282422,
+      "gesture_ids": [
+        "8255561e",
+        "c0fed223",
+        "49d27167"
+      ],
+      "updated_at": 1794688754.108016
     }
   ]
 }

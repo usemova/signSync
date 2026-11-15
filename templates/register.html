@@ -160,6 +160,19 @@
       display: none;
     }
 
+    /* live hand-landmark overlay (same drawing style as /playground) */
+    .mv-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .mv-stage.is-reviewing .mv-overlay {
+      display: none;
+    }
+
     .mv-wait-hint {
       position: absolute;
       bottom: 10px;
@@ -301,8 +314,9 @@
         <div id="stage" class="mv-stage" data-mode="laptop" style="flex:1;min-height:0">
           <video id="video" autoplay muted playsinline></video>
           <img id="streamFrame" class="mv-stream-img" alt="Backend camera stream">
+          <canvas id="landmarkOverlay" class="mv-overlay"></canvas>
           <img id="captureImage" class="mv-capture-img" alt="Captured hand gesture">
-          <div class="mv-stage-empty">Open the camera to see a live preview.</div>
+          <div class="mv-stage-empty">Waiting for the camera…</div>
           <span class="mv-live-badge"><span class="mv-dot"></span>LIVE</span>
           <div class="mv-wait-hint" id="waitHint">connecting to backend stream…</div>
           <div id="countdown" class="mv-countdown">3</div>
@@ -323,7 +337,7 @@
             <h2 class="mv-head-title">Capture status</h2>
           </div>
         </div>
-        <div id="status" class="mv-status">Open the camera when you are ready.</div>
+        <div id="status" class="mv-status">Starting the camera…</div>
         <div class="mv-metric">
           <small>Detected hands</small>
           <strong id="handCount">—</strong>
@@ -434,6 +448,153 @@
       state.captureId = (await response.json()).capture_id;
     }
 
+    // ===== live gesture pipeline (same /ws/pipeline the playground uses) ====
+    const HAND_LINKS = [
+      [0, 1], [1, 2], [2, 3], [3, 4],
+      [0, 5], [5, 6], [6, 7], [7, 8],
+      [5, 9], [9, 10], [10, 11], [11, 12],
+      [9, 13], [13, 14], [14, 15], [15, 16],
+      [13, 17], [17, 18], [18, 19], [19, 20],
+      [0, 17]
+    ];
+    const FINGERTIPS = [4, 8, 12, 16, 20];
+    const PIPE_FPS = 9;
+    const PIPE_INTERVAL = Math.round(1000 / PIPE_FPS);
+    const overlay = $('landmarkOverlay');
+    const overlayCtx = overlay.getContext('2d');
+    const grabCanvas = document.createElement('canvas');
+    const grabCtx = grabCanvas.getContext('2d');
+    let pipeSocket = null;
+    let pipeRunning = false;
+    let pipeSending = false;
+    let pipeLastSent = 0;
+
+    // laptop preview or the backend stream image, whichever is on stage
+    function activeSource() {
+      return state.mode === 'laptop' ? $('video') : $('streamFrame');
+    }
+
+    function sourceSize() {
+      const src = activeSource();
+      return {
+        w: state.mode === 'laptop' ? src.videoWidth : src.naturalWidth,
+        h: state.mode === 'laptop' ? src.videoHeight : src.naturalHeight
+      };
+    }
+
+    function clearOverlay() {
+      overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    function drawOverlay(hands) {
+      const rect = overlay.getBoundingClientRect();
+      if (!rect.width) return;
+      const scale = window.devicePixelRatio || 1;
+      overlay.width = Math.max(1, rect.width * scale);
+      overlay.height = Math.max(1, rect.height * scale);
+      overlayCtx.setTransform(scale, 0, 0, scale, 0, 0);
+      overlayCtx.clearRect(0, 0, rect.width, rect.height);
+
+      const { w: sw, h: sh } = sourceSize();
+      if (!hands || !hands.length || !sw || !sh) return;
+
+      // map normalized landmarks onto the object-fit:cover preview box
+      const va = sw / sh;
+      const ba = rect.width / rect.height;
+      let bw, bh;
+      if (ba > va) { bw = rect.width; bh = bw / va; } else { bh = rect.height; bw = bh * va; }
+      const bx = (rect.width - bw) / 2;
+      const by = (rect.height - bh) / 2;
+      // the stage mirrors the preview horizontally, so flip x to match
+      const point = p => [bx + (1 - p[0]) * bw, by + p[1] * bh];
+
+      overlayCtx.lineWidth = 2;
+      overlayCtx.strokeStyle = '#38bdf8';
+      for (const hand of hands) {
+        overlayCtx.beginPath();
+        for (const [a, b] of HAND_LINKS) {
+          const s = point(hand[a]);
+          const e = point(hand[b]);
+          overlayCtx.moveTo(s[0], s[1]);
+          overlayCtx.lineTo(e[0], e[1]);
+        }
+        overlayCtx.stroke();
+
+        hand.forEach((p, idx) => {
+          const [x, y] = point(p);
+          overlayCtx.beginPath();
+          overlayCtx.arc(x, y, FINGERTIPS.includes(idx) ? 3.6 : 3, 0, Math.PI * 2);
+          overlayCtx.fillStyle = FINGERTIPS.includes(idx) ? '#ff5938' : '#5fd8ff';
+          overlayCtx.fill();
+        });
+      }
+    }
+
+    function sendPipeFrame() {
+      if (!pipeRunning || pipeSending || pipeSocket?.readyState !== WebSocket.OPEN) return;
+      const { w, h } = sourceSize();
+      if (!w || !h) return;
+      const tw = 480;
+      const th = Math.round(tw * h / w);
+      grabCanvas.width = tw;
+      grabCanvas.height = th;
+      grabCtx.drawImage(activeSource(), 0, 0, tw, th);
+
+      pipeSending = true;
+      pipeLastSent = performance.now();
+      pipeSocket.send(JSON.stringify({ image_base64: grabCanvas.toDataURL('image/jpeg', 0.68) }));
+    }
+
+    function connectPipeline() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      pipeSocket = new WebSocket(`${proto}://${location.host}/ws/pipeline`);
+      pipeSocket.onopen = () => {
+        // same defaults the playground heart-button uses (65% threshold)
+        pipeSocket.send(JSON.stringify({
+          action: 'init',
+          threshold: 65,
+          frames: 6,
+          window: Math.max(3, (Math.round(PIPE_FPS * 0.8) | 1))
+        }));
+        sendPipeFrame();
+      };
+      pipeSocket.onmessage = event => {
+        pipeSending = false;
+        let data;
+        try { data = JSON.parse(event.data); } catch { return; }
+        // while reviewing a captured still, keep the metrics frozen on it
+        if (!data.error && !$('stage').classList.contains('is-reviewing')) {
+          $('handCount').textContent = data.hand_count || '0';
+          drawOverlay(data.landmarks);
+        }
+        if (pipeRunning) {
+          const waitMs = Math.max(10, PIPE_INTERVAL - (performance.now() - pipeLastSent));
+          setTimeout(sendPipeFrame, waitMs);
+        }
+      };
+      pipeSocket.onerror = () => { pipeSending = false; };
+      pipeSocket.onclose = () => {
+        pipeSending = false;
+        if (pipeRunning) setTimeout(connectPipeline, 1000);
+      };
+    }
+
+    function startPipeline() {
+      if (pipeRunning) return;
+      pipeRunning = true;
+      connectPipeline();
+    }
+
+    function stopPipeline() {
+      pipeRunning = false;
+      pipeSending = false;
+      pipeSocket?.close();
+      pipeSocket = null;
+      clearOverlay();
+      $('handCount').textContent = '—';
+    }
+
     // ===== capture source toggle ============================================
     $('srcToggle').querySelectorAll('button').forEach(btn => {
       btn.onclick = () => {
@@ -452,6 +613,7 @@
       if (state.captureId) fetch(`/api/capture/cancel/${state.captureId}`).catch(() => {});
       state.captureId = null;
       state.hasFeatures = false;
+      updateSaveButton();
 
       const stage = $('stage');
       stage.setAttribute('data-mode', mode);
@@ -467,15 +629,16 @@
       $('retake').classList.add('hidden');
       $('frameState').textContent = 'No';
 
-      // laptop needs the permission button; the stream connects on its own
+      // both sources start on their own now — no permission button needed
       $('openCamera').style.display = mode === 'laptop' ? '' : 'none';
+      $('openCamera').textContent = 'Open camera';
       document.querySelector('.mv-stage-empty').textContent =
-        mode === 'laptop' ? 'Open the camera to see a live preview.' : 'Waiting for the backend stream…';
-      if (mode === 'stream') {
+        mode === 'laptop' ? 'Waiting for the camera…' : 'Waiting for the backend stream…';
+      if (mode === 'laptop') {
+        startLaptopCamera();
+      } else {
         ensureStream();
         setStatus('Watching the backend stream. Position your hand, then capture.', '');
-      } else {
-        setStatus('Open the camera when you are ready.');
       }
     }
 
@@ -495,6 +658,7 @@
         $('cameraBadge').classList.add('accent');
         $('waitHint').textContent = '';
         $('captureFrame').disabled = false;
+        startPipeline();
         pollStreamStatus();
         setStatus('Backend stream connected. Position your hand, then capture the pose.');
       };
@@ -504,6 +668,7 @@
         $('cameraBadge').classList.remove('accent');
         $('captureFrame').disabled = true;
         $('streamFps').style.display = 'none';
+        stopPipeline();
         clearInterval(state.statusTimer);
         $('waitHint').textContent = 'backend stream not available — retrying…';
         clearInterval(state.streamTimer);
@@ -535,12 +700,9 @@
       state.statusTimer = setInterval(tick, 2000);
     }
 
-    $('openCamera').onclick = async () => {
-      if (!$('gestureName').value.trim()) {
-        setStatus('Add a gesture name before opening the camera.', 'error');
-        $('gestureName').focus();
-        return;
-      }
+    // opens the camera without any name gate — the save button is what
+    // stays blocked until the name is filled in
+    async function startLaptopCamera() {
       if (!navigator.mediaDevices?.getUserMedia) {
         setStatus('This browser does not support camera access. Use HTTPS or localhost.', 'error');
         return;
@@ -555,6 +717,7 @@
         $('video').srcObject = state.stream;
         await $('video').play();
         await startSession();
+        startPipeline();
 
         $('stage').classList.add('is-live');
         $('cameraBadge').textContent = 'live';
@@ -565,21 +728,18 @@
       } catch (error) {
         console.error(error);
         stopSource();
+        stopPipeline();
         $('openCamera').disabled = false;
-        setStatus(`Could not open the camera: ${error.message}`, 'error');
+        $('openCamera').textContent = 'Open camera';
+        setStatus(`Could not open the camera: ${error.message} — click "Open camera" to retry.`, 'error');
       }
-    };
+    }
+    $('openCamera').onclick = startLaptopCamera;
 
     const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
     $('captureFrame').onclick = async () => {
       if (state.busy) return;
-      // in stream mode nothing else gates the flow, so check the name here
-      if (state.mode === 'stream' && !$('gestureName').value.trim()) {
-        setStatus('Add a gesture name before capturing.', 'error');
-        $('gestureName').focus();
-        return;
-      }
       const srcEl = state.mode === 'laptop' ? $('video') : $('streamFrame');
       const srcWidth = state.mode === 'laptop' ? srcEl.videoWidth : srcEl.naturalWidth;
       if (!srcWidth) return;
@@ -632,9 +792,13 @@
         $('stage').classList.add('is-reviewing');
         $('retake').classList.remove('hidden');
         $('captureFrame').textContent = 'Capture again';
-        $('saveGesture').disabled = false;
+        updateSaveButton();
         $('frameState').textContent = 'Ready';
-        setStatus(`${data.hand_count} hand${data.hand_count === 1 ? '' : 's'} captured. Save it when it looks right.`, 'ready');
+        setStatus(
+          `${data.hand_count} hand${data.hand_count === 1 ? '' : 's'} captured.` +
+          ($('gestureName').value.trim() ? ' Save it when it looks right.' : ' Add a gesture name to save it.'),
+          'ready'
+        );
       } catch (error) {
         console.error(error);
         setStatus(error.message, 'error');
@@ -649,10 +813,24 @@
       $('stage').classList.remove('is-reviewing');
       $('retake').classList.add('hidden');
       state.hasFeatures = false;
-      $('saveGesture').disabled = true;
+      updateSaveButton();
       $('frameState').textContent = 'No';
       setStatus('Ready for another capture.');
-    };    $('saveGesture').onclick = async () => {
+    };
+
+    // Save stays blocked until there is a good capture AND a gesture name
+    function updateSaveButton() {
+      $('saveGesture').disabled = !(state.hasFeatures && $('gestureName').value.trim());
+    }
+    $('gestureName').addEventListener('input', updateSaveButton);
+
+    $('saveGesture').onclick = async () => {
+      const name = $('gestureName').value.trim();
+      if (!name) {
+        setStatus('Add a gesture name before saving.', 'error');
+        $('gestureName').focus();
+        return;
+      }
       if (!state.hasFeatures || !state.captureId) return;
       const button = $('saveGesture');
       button.disabled = true;
@@ -679,7 +857,7 @@
         window.location.href = '/admin/gestures';
       } catch (error) {
         setStatus(error.message, 'error');
-        button.disabled = false;
+        updateSaveButton();
         button.textContent = 'Save gesture';
       }
     };
@@ -697,6 +875,10 @@
       stopSource();
       if (state.captureId) fetch(`/api/capture/cancel/${state.captureId}`).catch(() => {});
     });
+
+    // camera (and the live landmark pipeline) come up on their own — no
+    // button press, no name needed until you hit Save
+    startLaptopCamera();
   </script>
 </body>
 </html>

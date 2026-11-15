@@ -731,6 +731,39 @@ async def switch_workspace(req: WorkspaceCreateRequest):
 async def health():    return {"status": "ok", "gestures_count": len(store.get_all())}
 
 
+# OpenAI-style models listing — some clients (and polling tools) probe
+# /v1/models on any local server; instead of a 404 we expose the
+# registered gestures as model ids so the probe gets a useful 200.
+@app.get("/v1/models")
+async def list_models():
+    data = {
+        "object": "list",
+        "data": [
+            {
+                "id": g.get("name", f"gesture_{i}"),
+                "object": "model",
+                "created": 0,
+                "owned_by": "mova",
+            }
+            for i, g in enumerate(store.get_all())
+        ],
+    }
+    return data
+
+
+@app.get("/v1/models/{model_id}")
+async def get_model(model_id: str):
+    gesture = next((g for g in store.get_all() if g.get("name") == model_id), None)
+    if gesture is None:
+        raise HTTPException(404, f"model '{model_id}' not found")
+    return {
+        "id": gesture.get("name", model_id),
+        "object": "model",
+        "created": 0,
+        "owned_by": "mova",
+    }
+
+
 # ============================================================
 # Camera relay — the minimal node capture page (or any sender)
 # pushes frames here, and every admin page / test surface
