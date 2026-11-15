@@ -111,6 +111,12 @@ class RealTimePipeline:
     def set_threshold(self, threshold: float) -> None:
         self.threshold = float(np.clip(threshold, 10.0, 95.0))
 
+    def set_pool(self, gesture_ids: Optional[List[str]]) -> None:
+        """Pin the match pool to an explicit gesture-id set (register page).
+
+        None/[] restores the standard scope rules."""
+        self.spaces.set_pool(gesture_ids)
+
     def set_window_size(self, size: int) -> None:
         self.buffer.set_window_size(int(size))
 

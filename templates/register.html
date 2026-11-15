@@ -74,14 +74,6 @@
       gap: 12px;
     }
 
-    .mv-helper {
-      margin-top: auto;
-      padding-top: 12px;
-      border-top: 1px solid var(--mv-line-soft);
-      color: var(--mv-muted);
-      font-size: 11.5px;
-    }
-
     .mv-capture-actions {
       display: flex;
       gap: 8px;
@@ -173,6 +165,91 @@
       display: none;
     }
 
+    /* ============================================================
+       Similar-gesture watch — live matches scoped to the selected group
+       ============================================================ */
+    .mv-similar {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 8px 10px;
+      border: 1px solid var(--mv-line-soft);
+      background: var(--mv-row);
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .mv-similar-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--mv-muted);
+    }
+
+    .mv-similar-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .mv-similar-empty {
+      font-size: 11px;
+      color: var(--mv-muted);
+    }
+
+    .mv-match {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .mv-match canvas {
+      width: 38px;
+      height: 38px;
+      background: #000;
+      border: 1px solid var(--mv-line);
+    }
+
+    .mv-match-mid {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .mv-match-name {
+      font-size: 11.5px;
+      color: var(--mv-text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mv-match-bar {
+      display: block;
+      height: 3px;
+      background: var(--mv-line-soft);
+    }
+
+    .mv-match-fill {
+      display: block;
+      height: 100%;
+      background: var(--mv-accent);
+    }
+
+    .mv-match.is-copying .mv-match-fill {
+      background: var(--mv-danger);
+    }
+
+    .mv-match-score {
+      font-size: 10.5px;
+      color: var(--mv-muted);
+    }
+
     .mv-wait-hint {
       position: absolute;
       bottom: 10px;
@@ -206,9 +283,9 @@
         display: grid;
         grid-template-columns: 1fr 1fr;
       }
-      .mv-helper {
-        margin-top: 0;
+      .mv-similar {
         grid-column: 1 / -1;
+        min-height: 160px;
       }
     }
   </style>
@@ -346,7 +423,15 @@
           <small>Saved frame</small>
           <strong id="frameState">No</strong>
         </div>
-        <p class="mv-helper">You can register either one or two hands. The detector records the hand count from the frame you save.</p>
+        <div class="mv-similar">
+          <div class="mv-similar-head">
+            <small>Similar gestures</small>
+            <span id="similarPool" class="mv-pill">standard</span>
+          </div>
+          <div id="similarList" class="mv-similar-list">
+            <p class="mv-similar-empty">Make a pose — close matches appear here.</p>
+          </div>
+        </div>
       </aside>
     </section>
   </main>
@@ -392,6 +477,10 @@
       const chosen = state.spaces.find(s => s.id === $('groupSelect').value);
       const oneShot = !!chosen && chosen.join_mode === 'one_shot';
       $('shotBlock').style.display = oneShot ? '' : 'none';
+      // the match pool follows the selection: group poses are only compared
+      // against poses inside the same group
+      renderSimilar();
+      syncPipePool();
     }
 
     const setStatus = (message, type = '') => {
@@ -557,6 +646,7 @@
           frames: 6,
           window: Math.max(3, (Math.round(PIPE_FPS * 0.8) | 1))
         }));
+        syncPipePool();
         sendPipeFrame();
       };
       pipeSocket.onmessage = event => {
@@ -567,6 +657,7 @@
         if (!data.error && !$('stage').classList.contains('is-reviewing')) {
           $('handCount').textContent = data.hand_count || '0';
           drawOverlay(data.landmarks);
+          updateSimilar(data.scores, data.threshold, data.hand_count);
         }
         if (pipeRunning) {
           const waitMs = Math.max(10, PIPE_INTERVAL - (performance.now() - pipeLastSent));
@@ -593,6 +684,166 @@
       pipeSocket = null;
       clearOverlay();
       $('handCount').textContent = '—';
+    }
+
+    // ===== similar-gesture watch (scoped to the selected group) ============
+    // Groups are allowed to copy standard gestures, so a Standard
+    // registration only warns about standard poses, and a registration
+    // inside group X only warns about poses already inside group X.
+    let libGestures = [];
+    let libById = new Map();
+    let spaceById = new Map();   // space id -> { key, ids:Set }
+    let inSpaceIds = new Set();  // gesture ids that belong to any group
+    let lastScores = [];
+    let lastThreshold = 65;
+    let lastHandCount = 0;
+
+    async function loadSimilarLibrary() {
+      try {
+        const res = await fetch('/api/playground/library');
+        if (!res.ok) return;
+        const data = await res.json();
+        libGestures = data.gestures || [];
+        libById = new Map(libGestures.map(g => [g.id, g]));
+        spaceById = new Map((data.spaces || []).map(sp =>
+          [sp.id, { key: sp.key, ids: new Set(sp.gesture_ids || []) }]));
+        inSpaceIds = new Set([...spaceById.values()].flatMap(s => [...s.ids]));
+        renderSimilar();
+        syncPipePool();
+      } catch { /* library is optional for the watch card */ }
+    }
+
+    // which pool the live pose is compared against
+    function similarPool() {
+      const space = spaceById.get($('groupSelect').value);
+      if (space) return { label: `group: ${space.key}`, ids: space.ids, empty: space.ids.size === 0 };
+      return { label: 'standard', ids: null, empty: false };
+    }
+
+    function inPool(gestureId, pool) {
+      if (pool.ids) return pool.ids.has(gestureId);
+      return !inSpaceIds.has(gestureId);
+    }
+
+    // tell the pipeline which gesture pool to score against: the selected
+    // group's members, or standard scope when no group is chosen. Without
+    // this the server only ever scores standard gestures, so group
+    // selections would never surface any matches.
+    function syncPipePool() {
+      if (pipeSocket?.readyState !== WebSocket.OPEN) return;
+      const space = spaceById.get($('groupSelect').value);
+      pipeSocket.send(JSON.stringify({
+        action: 'set_pool',
+        gesture_ids: space ? [...space.ids] : null
+      }));
+    }
+
+    function updateSimilar(scores, threshold, handCount) {
+      lastScores = Array.isArray(scores) ? scores : [];
+      if (Number.isFinite(threshold)) lastThreshold = threshold;
+      lastHandCount = handCount || 0;
+      renderSimilar();
+    }
+
+    // skeleton thumbnail for a match — same style as playground's top-5 rows
+    function drawMatchSkeleton(canvas, points) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!Array.isArray(points) || !points.length || !Array.isArray(points[0])) return;
+      if (Array.isArray(points[0][0])) points = points.flat();   // nested live frames
+      if (!points.length || !Number.isFinite(points[0][0])) return;
+      const hands = points.length > 21
+        ? [points.slice(0, 21), points.slice(21, 42)]
+        : [points];
+      const flats = hands.map(hand => hand.map(p => [Number(p[0]) || 0, Number(p[1]) || 0]));
+
+      // shared bbox keeps both hands in their true relative placement
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const flat of flats) {
+        for (const [x, y] of flat) {
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+      }
+      const bw = Math.max(maxX - minX, 0.02);
+      const bh = Math.max(maxY - minY, 0.02);
+      const W = canvas.width, H = canvas.height, pad = 8;
+      const s = Math.min((W - pad * 2) / bw, (H - pad * 2) / bh);
+      const ox = (W - bw * s) / 2;
+      const oy = (H - bh * s) / 2;
+      const pt = (flat, i) => [ox + (flat[i][0] - minX) * s, oy + (flat[i][1] - minY) * s];
+
+      for (const flat of flats) {
+        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
+        ctx.beginPath();
+        for (const [a, b] of HAND_LINKS) {
+          const p1 = pt(flat, a), p2 = pt(flat, b);
+          ctx.moveTo(p1[0], p1[1]);
+          ctx.lineTo(p2[0], p2[1]);
+        }
+        ctx.stroke();
+        flat.forEach((p, i) => {
+          const [x, y] = pt(flat, i);
+          ctx.beginPath();
+          ctx.arc(x, y, FINGERTIPS.includes(i) ? 2.6 : 2.1, 0, Math.PI * 2);
+          ctx.fillStyle = FINGERTIPS.includes(i) ? '#ff5938' : 'rgba(95, 216, 255, 0.95)';
+          ctx.fill();
+        });
+      }
+    }
+
+    function makeMatchRow(match) {
+      const copying = match.score >= lastThreshold;
+      const row = document.createElement('div');
+      row.className = 'mv-match' + (copying ? ' is-copying' : '');
+
+      const thumb = document.createElement('canvas');
+      thumb.width = 64;
+      thumb.height = 64;
+      drawMatchSkeleton(thumb, libById.get(match.id)?.landmarks);
+
+      const mid = document.createElement('div');
+      mid.className = 'mv-match-mid';
+      const name = document.createElement('span');
+      name.className = 'mv-match-name';
+      name.textContent = match.name;
+      const bar = document.createElement('span');
+      bar.className = 'mv-match-bar';
+      const fill = document.createElement('span');
+      fill.className = 'mv-match-fill';
+      fill.style.width = `${Math.round(match.score)}%`;
+      bar.append(fill);
+      mid.append(name, bar);
+
+      const score = document.createElement('span');
+      score.className = 'mv-match-score';
+      score.textContent = `${Math.round(match.score)}%`;
+
+      row.append(thumb, mid, score);
+      return row;
+    }
+
+    function renderSimilar() {
+      const pool = similarPool();
+      $('similarPool').textContent = pool.label;
+
+      // reuse the pipeline's top-5, narrowed to the selected pool
+      const matches = lastScores
+        .filter(m => inPool(m.id, pool) && m.score >= 40)
+        .slice(0, 3);
+
+      const list = $('similarList');
+      list.replaceChildren(...matches.map(makeMatchRow));
+      if (!matches.length) {
+        let hint = 'Make a pose — close matches appear here.';
+        if (pool.empty) hint = 'This group is empty — any pose is safe here.';
+        else if (lastHandCount > 0) hint = 'No close match in this pool — you\'re clear.';
+        list.append(Object.assign(document.createElement('p'), {
+          className: 'mv-similar-empty',
+          textContent: hint
+        }));
+      }
     }
 
     // ===== capture source toggle ============================================
@@ -879,6 +1130,7 @@
     // camera (and the live landmark pipeline) come up on their own — no
     // button press, no name needed until you hit Save
     startLaptopCamera();
+    loadSimilarLibrary();
   </script>
 </body>
 </html>

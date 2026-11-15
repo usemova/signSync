@@ -510,6 +510,10 @@ async def pipeline_stream(websocket: WebSocket):
             elif action == "set_timeout":
                 pipeline.buffer.end_signal_frames = int(payload.get("frames", 25))
                 continue
+            elif action == "set_pool":
+                # register page pins the match pool to the selected group
+                pipeline.set_pool(payload.get("gesture_ids"))
+                continue
             elif action == "init":
                 if "threshold" in payload:
                     pipeline.set_threshold(float(payload["threshold"]))

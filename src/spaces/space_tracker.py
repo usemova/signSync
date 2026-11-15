@@ -10,7 +10,7 @@ Because scoping happens before scoring, a letter sign can never collide with
 a normal keyword — group-vs-group competition is eliminated at the source.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 import time
 
 # Roles that stay scoreable outside any space.
@@ -40,6 +40,11 @@ class SpaceTracker:
         self.pending_join_mode: Optional[str] = None
         self.last_flush_join_mode: Optional[str] = None
         self._cooldown_until: float = 0.0
+        # Optional per-pipeline pool override (register page): an explicit
+        # gesture-id set to compete against, bypassing space scoping so the
+        # admin can preview matches for the group being registered into.
+        # None = normal scope rules.
+        self.pool_override: Optional[Set[str]] = None
         # name -> (id, role); rebuilt lazily
         self._role_by_name: Dict[str, Dict[str, str]] = {}
 
@@ -64,6 +69,8 @@ class SpaceTracker:
     def scoped_candidates(self) -> List[Dict[str, Any]]:
         """Gesture list handed to score_gestures for the current mode."""
         self.refresh()
+        if self.pool_override is not None:
+            return [g for g in self.gestures.get_all() if g.get("id") in self.pool_override]
         if self.active_space_id:
             space = self.spaces.get_by_id(self.active_space_id)
             if space is None:
@@ -79,6 +86,16 @@ class SpaceTracker:
 
     def _standard_candidates(self) -> List[Dict[str, Any]]:
         return [g for g in self.gestures.get_all() if g.get("role", "normal") in {"normal"} | CONTROL_ROLES]
+
+    def set_pool(self, gesture_ids: Optional[List[str]]) -> None:
+        """Pin the match pool to an explicit gesture-id set (per pipeline).
+
+        Passing an id list makes every later scoped_candidates() call compete
+        only those gestures — used by the register page to preview matches
+        for the group being registered into. Passing None/[] restores the
+        standard scope rules.
+        """
+        self.pool_override = set(gesture_ids) if gesture_ids else None
 
     # ----------------------------------------------------------- state machine
 
