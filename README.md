@@ -1,131 +1,129 @@
-# MOVA: Motion-Oriented Versatile Automation
+# SignSync
 
-## 1. Overview & Dual Purpose
+### Real-Time Hand Gesture Recognition & Speech
 
-**MOVA** is built around two core pillars:
+<p align="center">
+  <img src="assets/ss_playground.gif" alt="SignSync Playground demo" width="800"/>
+</p>
 
-1. **A Modular Hardware & Peripheral Framework:** An embedded MCU architecture that abstracts physical microcontroller pins into reconfigurable logical sockets, standard drivers, adaptors, and event hooks. It allows arbitrary sensors and actuators to be plugged in, remapped, and controlled via wireless events without touching low-level pin logic.
-2. **A Motion-Driven Interaction Pipeline:** A First-Person Perspective (FPP) computer-vision pipeline that normalizes hand gestures in real time, translating natural physical motions into structured action events.
+SignSync is a computer-vision system that turns live hand gestures into
+recognized actions and spoken responses. A camera feeds frames to a backend,
+MediaPipe extracts hand landmarks, a fusion scorer compares the pose against a
+stored gesture library, and a buffer + speech layer turns accepted gestures
+into audio.
 
----
+***
 
-## 2. Implementations & Use Cases
+## Highlights
 
-While MOVA provides a general-purpose hardware-software event architecture, its primary real-world implementation focuses on assistive tech:
+- **Real-time hand tracking** with MediaPipe: 21 landmarks per hand, Left/Right.
+- **Fusion scoring**: shape similarity + finger extension + inter-finger gaps
+  combined into a single 0–100% match score.
+- **Group-scoped matching** so gestures in different groups never collide.
+- **Live Playground**: landmark overlay, top-5 match preview, buffer state,
+  sentence layer, and TTS playback.
+- **Register page**: name-gated capture with a 3-2-1 countdown and a live
+  "similar gestures" panel to prevent duplicates.
+- **Groups management**: create, rename, and organize gesture collections.
 
-* **Assistive Communication for the Mute & Speech-Impaired (Primary Implementation):** 
-  A wearable, head-mounted FPP camera captures hand gestures as the user signs naturally over their chest area. The pipeline decodes the handshapes, spatial orientation, and multi-hand relationships, converting them into live speech synthesis and structured phrases via downstream language processing.
-* **Touchless Hardware & Smart Device Automation:**
-  Using the modular hardware layer, decoded gesture events (e.g. action commands, directional triggers) are broadcast over Wi-Fi to MCU-controlled devices—operating lights, appliances, robotics, or environment controls hands-free.
-* **Plug-and-Play Embedded Prototyping:**
-  The hardware socket/adaptor system serves as a standalone framework for rapid MCU prototyping, allowing developers to swap physical peripherals (I2C, GPIO, ultrasonic, LEDs, relays) across logical sockets with zero code rewrites.
+***
 
----
+## Screenshots
 
-## 2. System Architecture
+### Playground: live gesture input
 
-For complete diagrams, space state machines, and pipeline flows, see [Architecture & Pipelines](docs/ARCHITECTURE.md).
+![Playground](assets/ss_playground.gif)
 
-```text
-       [ Wearable FPP Camera ]
-                  │ (Live Video Stream)
-                  ▼
-       [ Software & Vision Layer ]
-       ├── MediaPipe Landmark Detection (21 points/hand)
-       ├── Geometric Normalization (Wrist-centered, scale invariant)
-       ├── Sign Space Scoping (Words, Spell, One-Shot)
-       ├── Sliding Window Gesture Buffer & Deduplication
-       └── Direct LLM Sentence Formulation + TTS Audio Stream
-                  │ (Event / Action / Speech over Wi-Fi / WebSockets)
-                  ▼
-       [ Hardware & Audio Outputs ]
-       ├── Web Audio Player (Instant Speech & LLM Audio Output)
-       └── Modular MCU Hardware (Sockets, Drivers, Adaptors, Actuators)
-```
+The Playground is the live demo surface. It shows the camera feed with a
+hand-skeleton overlay, the top-5 matching gestures with skeleton thumbnails and
+similarity percentages, the gesture buffer state, the AI sentence layer, and
+text-to-speech playback: all updating in real time.
 
----
+***
 
-## 3. Project Structure
+### Register: capture & save a gesture
 
-```text
-Mova/
-├── docs/                        # Project & hardware documentation
-│   ├── ARCHITECTURE.md          # Full system architecture, mode workflows & pipeline diagrams
-│   └── hardware/
-│       ├── DEVELOPER_GUIDE.md   # Hardware framework internal architecture
-│       └── USER_GUIDE.md        # Pin socket mapping & component usage
-│
-├── src/                         # Production application & recognition engine
-│   ├── server/                  # FastAPI web server, WebSocket feed & REST APIs
-│   ├── pipeline/                # Real-time pipeline orchestrating vision & buffering
-│   ├── vision/                  # MediaPipe landmark tracking & geometric scoring
-│   ├── spaces/                  # Sign Space tracker & One-Shot instant speech
-│   ├── buffer/                  # Gesture smoothing, outlier filtering & deduplication
-│   ├── ai/                      # Direct LLM sentence synthesis & TTS speech
-│   └── storage/                 # Gestures, Sign Spaces & Workspace stores
-│
-├── templates/                   # Frontend web UI (Dashboard, Groups, Register, Settings)
-├── data/                        # JSON persistent storage (gestures, spaces, workspaces)
-│
-├── hardware/                    # Embedded MCU & firmware layer
-│   └── simulation/              # Velxio / Wokwi hardware simulation prototype
-└── assets/                      # CAD 3D models, PCB files, schematics, references
-```
+![Register](assets/ss_register.png)
 
----
+The Register page lets you author new gestures. The camera opens by default
+with a live landmark overlay; a 3-2-1 countdown captures the pose, and the
+frame is shown for review before saving. Saving stays blocked until a gesture
+name is entered, and a "similar gestures" panel warns about duplicates inside
+the selected group.
 
-## 4. How the Key Layers Work
+***
 
-### A. The Hand Gesture Pipeline (`experiments/gesture_matching/`)
-* **First-Person View (FPP):** Optimized for a user looking down at their own hands.
-* **Why raw coordinates are NOT used:** Distance and position change as hands move. Instead, coordinates are centered on the wrist and scaled by the hand size.
-* **Orientation Awareness:** Calculates a 3D Palm Normal vector so pointing forward ("You") and pointing backward ("Me") are never confused.
-* **Two-Hand Support:** Evaluates each hand shape independently plus the relative direction vector between wrists (e.g. supporting gestures like "Cup & Tray" or "Namaste").
-* **Top-N Output:** Returns a ranked list of scores rather than a hard single winner. This enables a downstream language model (LLM) to infer the intended sentence even if a finger is partially blocked.
+### Groups: organize gesture collections
 
-### B. The Hardware Architecture (`hardware/simulation/`)
-Instead of hardcoding pin numbers across the code:
-* **Sockets:** MCU pins are mapped to logical sockets (`SOCKET_GPIO_1`, `SOCKET_I2C_1`).
-* **Drivers:** Handle raw signal communication with physical components.
-* **Adaptors:** Provide unified methods (e.g., `turnOn()`, `getDistanceCm()`).
-* **Hooks:** Link events to actions cleanly without tight coupling.
+![Groups](assets/ss_groups.png)
 
----
+Groups keep gestures scoped. Inside a group, only that group's gestures are
+matched against, so a group is free to reuse a standard pose without
+triggering a duplicate warning.
 
-## 5. Getting Started Quickstart
+***
 
-### Prerequisites
-* Python 3.10+
-* Virtual environment (`venv`)
+## How it works
 
-### Running the MOVA Server
+1. **Capture**: camera (webcam or stream) produces JPEG frames.
+2. **Detection (MediaPipe)**: hand landmarks + handedness extracted server-side.
+3. **Feature extraction**: landmarks become a numeric pose vector
+   (71 dims for one hand, 145 dims for two hands).
+4. **Fusion scoring**: the live pose is scored against stored gestures using
+   cosine shape similarity, finger-extension profile, and inter-finger tip gaps.
+5. **Scoping**: only gestures in the active group compete.
+6. **Threshold**: a match must clear ~65% confidence.
+7. **Buffer**: accepted gestures are sequenced; emits completion events.
+8. **Speech (TTS)**: composes and speaks a sentence from the gesture sequence.
+
+
+***
+
+## Post-processing: per-frame pipeline
+
+![Post-processing](assets/ss_postProcess.png)
+
+Every frame passes through a cleanup stage before a gesture is accepted:
+outliers are dropped, frames below the confidence threshold are ignored,
+and only stable, above-threshold poses make it into the gesture buffer.
+
+
+***
+
+## Quickstart
+
 ```bash
-# 1. Activate your virtual environment
-source venv/bin/activate        # On Linux / WSL
-# or: win_venv\Scripts\activate # On Windows
+# 1. Activate virtual environment
+source venv/bin/activate
 
 # 2. Install dependencies
-pip install -r requirements.txt # or: pip install mediapipe opencv-python fastapi uvicorn websockets
+pip install -r requirements.txt
 
-# 3. Launch the application
-python -m src.server.main
-# Open http://localhost:8000 in your browser
+# 3. Launch
+python run_server.py
+# Open http://localhost:8000
 ```
 
-### Running Hardware Simulation
-The firmware prototype in `hardware/simulation/` can be opened directly in [Velxio](https://velxio.dev/editor) or Wokwi using the provided `diagram.json` and `sketch.ino`.
+***
 
----
-
-## 6. Documentation References
-* [Full System Architecture & Pipelines](docs/ARCHITECTURE.md)
-* [Hardware Developer Guide](docs/hardware/DEVELOPER_GUIDE.md)
-* [Hardware Socket & Component User Guide](docs/hardware/USER_GUIDE.md)
+## Project structure
 
 ```
- [ Motion-Oriented ]   +   [ Versatile ]   +   [ Automation ]
-            ↓                       ↓                   ↓
-      The Vision / Input     The Modular HW       The Physical Action
-      (Hands, Gestures,      (Sockets, Adapters,  (MCU, Devices, Output,
-       Human Interaction)     Swappable Sensors)   Hardware Execution)
+SignSync/
+├── src/          # server, pipeline, vision, buffer, spaces, storage
+├── templates/    # frontend pages (playground, register, groups, gestures)
+├── static/       # css + js
+├── data/         # JSON gesture/space/workspaces stores
+├── assets/       # screenshots, gif, 3d models
+├── docs/         # architecture & pipelines
+└── hardware/     # embedded firmware (optional)
+```
+
+***
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Camera Pipeline](docs/004-camera-pipeline-vision-models.md)
+- [Spell Mode](docs/005-spell-mode.md)
 ```
